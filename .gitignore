@@ -1,0 +1,19 @@
+# Streamlit secrets — NEVER commit
+.streamlit/secrets.toml
+
+# Buildozer output
+bin/
+.buildozer/
+build.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+.venv/
+venv/
+
+# macOS
+.DS_Store
