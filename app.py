@@ -49,9 +49,27 @@ st.markdown("""
   }
 
   /* ── Base reset ── */
-  html, body, [class*="css"] {
+  html, body {
     font-family: 'Inter', sans-serif !important;
     background-color: var(--bg) !important;
+    color: var(--text) !important;
+  }
+
+  /* Font-only override on Streamlit internals — do NOT set bg/color here */
+  [class*="css"] {
+    font-family: 'Inter', sans-serif !important;
+  }
+
+  /* Explicit app background */
+  .stApp {
+    background-color: var(--bg) !important;
+  }
+
+  /* Fix text visibility on all common widgets */
+  .stTextInput input,
+  .stSelectbox div[data-baseweb="select"] *,
+  .stTextArea textarea,
+  label, p, li, span, h1, h2, h3, h4, h5, h6 {
     color: var(--text) !important;
   }
 
@@ -657,4 +675,4 @@ def run_build_pipeline(
 
     # ── STAGE 3: Fetch Artifact ──────────────
     ss["stage_idx"] = 3
-    apk_url = get_artifact_downlo
+    apk_url = get_artifact_download
