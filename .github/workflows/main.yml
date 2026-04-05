@@ -1,0 +1,210 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# BuildSwift AI — GitHub Actions Workflow
+# Triggered by: repository_dispatch (event_type: build-apk)
+#               OR manual workflow_dispatch
+#
+# What it does:
+#   1. Checks out the repo
+#   2. Installs Buildozer + Android SDK/NDK (cached for speed)
+#   3. Compiles your Kivy/Python code into a debug or release APK
+#   4. Uploads the APK as a GitHub Actions Artifact
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: BuildSwift AI — Build APK
+
+on:
+  repository_dispatch:
+    types: [build-apk]
+
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: "Application name"
+        required: false
+        default: "MyApp"
+      build_type:
+        description: "debug or release"
+        required: false
+        default: "debug"
+
+env:
+  # ── Resolved from dispatch payload or workflow_dispatch inputs ──
+  APP_NAME:    ${{ github.event.client_payload.app_name    || inputs.app_name    || 'MyApp' }}
+  BUILD_TYPE:  ${{ github.event.client_payload.build_type  || inputs.build_type  || 'debug' }}
+  SOURCE_PATH: ${{ github.event.client_payload.source_path || 'src/main.py' }}
+  # ── SDK / NDK pinned versions for reproducible builds ──
+  ANDROID_HOME: /home/runner/android-sdk
+  ANDROID_NDK_VERSION: "25b"
+  ANDROID_SDK_BUILD_TOOLS: "33.0.2"
+  ANDROID_COMPILE_SDK: "33"
+
+jobs:
+  build-apk:
+    name: Compile APK with Buildozer
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── 2. Python ─────────────────────────────────────────────────────────
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # ── 3. System dependencies ────────────────────────────────────────────
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip openjdk-17-jdk \
+            libssl-dev libffi-dev \
+            python3-dev python3-pip \
+            build-essential pkg-config \
+            libgstreamer1.0-dev \
+            libsdl2-dev libsdl2-image-dev \
+            libsdl2-mixer-dev libsdl2-ttf-dev \
+            libportmidi-dev libswscale-dev \
+            libavformat-dev libavcodec-dev \
+            zlib1g-dev autoconf libtool \
+            ccache lld
+
+      # ── 4. Cache: pip packages ────────────────────────────────────────────
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-buildozer-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-buildozer-
+
+      # ── 5. Cache: Buildozer global dir (~/.buildozer) ─────────────────────
+      - name: Cache Buildozer global directory
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: ${{ runner.os }}-buildozer-global-${{ env.ANDROID_NDK_VERSION }}-${{ env.ANDROID_COMPILE_SDK }}
+          restore-keys: |
+            ${{ runner.os }}-buildozer-global-
+
+      # ── 6. Cache: local .buildozer inside workspace ───────────────────────
+      - name: Cache local Buildozer workspace
+        uses: actions/cache@v4
+        with:
+          path: .buildozer
+          key: ${{ runner.os }}-buildozer-local-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-buildozer-local-
+
+      # ── 7. Install Python build tools ─────────────────────────────────────
+      - name: Install Buildozer + Kivy dependencies
+        run: |
+          pip install --upgrade pip wheel setuptools
+          pip install buildozer cython==0.29.36 virtualenv
+
+      # ── 8. Prepare source layout ──────────────────────────────────────────
+      #
+      # The Streamlit app writes code to SOURCE_PATH (e.g. src/main.py).
+      # Buildozer expects main.py in the project root, so we copy it there.
+      #
+      - name: Prepare source layout
+        run: |
+          if [ "$SOURCE_PATH" != "main.py" ]; then
+            echo "Copying $SOURCE_PATH → main.py"
+            cp "$SOURCE_PATH" main.py
+          fi
+
+      # ── 9. Generate buildozer.spec if absent ──────────────────────────────
+      - name: Generate buildozer.spec
+        run: |
+          if [ ! -f buildozer.spec ]; then
+            echo "No buildozer.spec found — generating default spec…"
+            buildozer init
+          fi
+
+          # Patch key fields dynamically
+          SLUG=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
+          sed -i "s/^title = .*/title = $APP_NAME/"               buildozer.spec
+          sed -i "s/^package.name = .*/package.name = $SLUG/"     buildozer.spec
+          sed -i "s/^package.domain = .*/package.domain = org.buildswift/" buildozer.spec
+          sed -i "s/^android.api = .*/android.api = $ANDROID_COMPILE_SDK/" buildozer.spec
+          sed -i "s/^android.minapi = .*/android.minapi = 21/"    buildozer.spec
+
+          # Ensure NDK version is locked
+          if grep -q "^android.ndk" buildozer.spec; then
+            sed -i "s/^android.ndk = .*/android.ndk = $ANDROID_NDK_VERSION/" buildozer.spec
+          else
+            echo "android.ndk = $ANDROID_NDK_VERSION"             >> buildozer.spec
+          fi
+
+          echo "─── Final buildozer.spec (relevant lines) ───"
+          grep -E "^(title|package\.|android\.(api|ndk|minapi))" buildozer.spec
+
+      # ── 10. Build APK ─────────────────────────────────────────────────────
+      - name: Build APK
+        env:
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+        run: |
+          export PATH=$JAVA_HOME/bin:$PATH
+          echo "Building $BUILD_TYPE APK for $APP_NAME…"
+          buildozer -v android $BUILD_TYPE 2>&1 | tee build.log
+
+          # Verify output exists
+          APK_PATH=$(find bin -name "*.apk" 2>/dev/null | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ APK not found after build. Last 60 lines of log:"
+            tail -60 build.log
+            exit 1
+          fi
+
+          echo "✅ APK produced: $APK_PATH"
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+
+      # ── 11. Rename APK with version stamp ─────────────────────────────────
+      - name: Rename and stage APK
+        run: |
+          SLUG=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
+          TIMESTAMP=$(date -u +'%Y%m%d_%H%M%S')
+          DEST="apk_output/${SLUG}_${BUILD_TYPE}_${TIMESTAMP}.apk"
+          mkdir -p apk_output
+          cp "$APK_PATH" "$DEST"
+          echo "APK_DEST=$DEST" >> $GITHUB_ENV
+          echo "APK name: $DEST"
+
+      # ── 12. Upload APK Artifact ────────────────────────────────────────────
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ env.APP_NAME }}-${{ env.BUILD_TYPE }}-${{ github.run_number }}
+          path: apk_output/*.apk
+          retention-days: 7
+          if-no-files-found: error
+
+      # ── 13. Upload build log on failure ───────────────────────────────────
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-failure-${{ github.run_number }}
+          path: build.log
+          retention-days: 3
+
+      # ── 14. Job summary ───────────────────────────────────────────────────
+      - name: Write job summary
+        if: success()
+        run: |
+          echo "## ⚡ BuildSwift AI — Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field        | Value |"                         >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|"                                          >> $GITHUB_STEP_SUMMARY
+          echo "| App Name     | \`$APP_NAME\` |"                 >> $GITHUB_STEP_SUMMARY
+          echo "| Build Type   | \`$BUILD_TYPE\` |"               >> $GITHUB_STEP_SUMMARY
+          echo "| Run Number   | \`${{ github.run_number }}\` |"  >> $GITHUB_STEP_SUMMARY
+          echo "| APK File     | \`$APK_DEST\` |"                 >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ APK available in **Artifacts** tab above."      >> $GITHUB_STEP_SUMMARY
